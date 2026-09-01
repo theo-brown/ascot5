@@ -118,10 +118,10 @@ def make_injector(*, r, phi, z, tanrad, focal_length, grid_w, grid_h,
     power : float
         Total injected power [W].
     div_h : float
-        Horizontal divergence half-angle [rad] (Gaussian std of the sampled
-        horizontal deflection).
+        Horizontal 1/e divergence half-angle [rad]; the sampled Gaussian
+        deflection has std div_h/sqrt(2), matching BBNBI5.
     div_v : float
-        Vertical divergence half-angle [rad].
+        Vertical 1/e divergence half-angle [rad].
     anum : int
         Mass number of the injected species.
     mass_amu : float
@@ -236,9 +236,12 @@ def sample_markers(key, injector, n):
     v_axis = jnp.cross(bdir, h_axis)
     v_axis = v_axis / jnp.linalg.norm(v_axis, axis=1, keepdims=True)
 
-    # Gaussian divergence (small-angle perturbation)
-    ah = injector.div_h * jax.random.normal(key_h, (n,))
-    av = injector.div_v * jax.random.normal(key_v, (n,))
+    # Gaussian divergence (small-angle perturbation). The divergence is the
+    # 1/e half-width of the angular intensity profile, so the Gaussian
+    # standard deviation is div/sqrt(2) — same convention as BBNBI5
+    # (src/nbi.c, nbi_inject).
+    ah = injector.div_h / jnp.sqrt(2.0) * jax.random.normal(key_h, (n,))
+    av = injector.div_v / jnp.sqrt(2.0) * jax.random.normal(key_v, (n,))
     vdir = bdir + ah[:, None] * h_axis + av[:, None] * v_axis
     vdir = vdir / jnp.linalg.norm(vdir, axis=1, keepdims=True)
 
