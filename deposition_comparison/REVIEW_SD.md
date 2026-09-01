@@ -214,3 +214,202 @@ Sanity output after the edits: checks 1-5 identical to the reviewed run
 cross-checks 1.1e-11 / 6.2e-11, split limits 0.962 / 0.983, tau_se-vs-NRL
 3.4e-4); new check 6 passes; scenario numbers at rho = 0.3 unchanged
 (tau_se = 0.8604 s, E_c = 162.91 keV, tau_th = 0.1005 s).
+
+## Review of ASCOT reference + comparison (agent E)
+
+Adversarial integration review of `run_ascot_reference.py` (agent B) and
+`test_slowing_down.py` / `run_sd_comparison.py` (agent C). Method: every claim
+re-derived numerically from the committed `sd_reference.npz`, the read-only
+`bbnbi_ref/ascot.h5` (endstate, raw rho5d dist, libascot post-processing —
+no ASCOT/BBNBI binary was executed), and the C/a5py sources. Scratch:
+`scratchpad/check_npz.py`, `check_analytic.py`, `check_h5*.py`,
+`check_moments.py` (session scratchpad, not committed).
+
+### Verification of agent B's deliverable
+
+**npz self-consistency (all pass):**
+
+- `pmax` typo correction verified: `sqrt(2 m_D 110 keV) = 1.0857544e-20`
+  kg m/s, bit-identical to the meta's `DIST_PMAX_SI`; the contract's
+  "1.1e-19" is off by 10x and would have wasted ~90% of the momentum bins.
+  B's deviation is correct.
+- Weight rescale exact: `sum(birth_weight) = w_total = 8.322e19 /s` (rel 0);
+  `3086 x 32.40441 = 100000.0` exactly (BBNBI weights are uniform), subset
+  mix 1728/903/455 full/half/third vs 55/30/15% nominal. Birth power
+  1.0072 MW: consistent with BBNBI shinethrough = 0 (phase-1 summary) plus
+  +0.7% subset energy-mix noise.
+- Integrals: `sum((pe+pi) V) = 777.686 kW`, `sum(energy_density V) =
+  65.505 kJ`, Pe fraction 0.23684 — all equal the meta and C's baked-in
+  numbers; identity `sum w (E0-20keV) = 740.538 kW`, ASCOT/identity = +5.02%.
+- E-xi extraction closes EXACTLY: `sum(density V) - sum(f_E dE V) =
+  7.298e16` particles = raw-dist content above 110 keV (6.919e16, the
+  energy-diffusion upscatter tail) + below 20 keV (3.79e15). The <= 3.2%
+  per-bin `f_E`-vs-density deviations are that windowing, not a conversion
+  bug. `ekin_edges` eV interpretation confirmed numerically.
+- Moments: re-running `getdist_moments` reproduces the npz `pe`/`pi`
+  bit-for-bit; moment-vs-analytic shell volumes max rel dev 4.948e-4
+  independently reconfirmed (B's <5e-4 claim holds). No unit slips, no bin
+  off-by-ones, no charge/time double counting found anywhere in `extract()`.
+
+**Steady-state normalization (independent route, passes):** dist fast-ion
+inventory `sum(density V) = 6.7635e18` vs `sum_i w_i x mileage_i = 6.7735e18`
+from the endstate — agreement to 0.15% (residual = dwell outside the dist
+box: the >|pmax| corner leak and rho>1 excursions). Equivalently
+inventory/source = 0.0813 s = the weighted mean thermalization mileage
+0.0814 s, vs the analytic mean dwell 0.1103 s (+36%, the documented
+lnL/E_c systematics — REVIEW_SD.md NOTES 1-2). The accumulated rho5d dist
+IS weight x residence time; no spurious time-bin (0.5 s) or mileage-cap
+factor anywhere.
+
+**Wall-hit deviation (ENDCOND_WALLHIT=0) — mechanism verified in source:**
+
+- `simulate_gc_adaptive.c:216` compares `fabs(p0.phi-p.phi)` directly
+  against `ada_max_dphi`; `hdf5_options.c:81` reads ADAPTIVE_MAX_DPHI with
+  NO deg2rad conversion (unlike the DIST phi/theta options at :302-303,
+  :474-475), so the default 2.0 permits 114.6-degree toroidal steps.
+- The phase-1 h5 wall is `wall_3D` (`run_bbnbi_reference.py:84-87`), and
+  `wall_3d_hit_wall` tests the straight 3D Cartesian chord of the step: a
+  115-degree chord at R ~ 6.9 m passes through R_mid ~ 3.7 m < inner wall
+  radius 4.1 m — the spurious inner-wall hit is geometrically real.
+- `WIENERSLOTS 20` (`ascot5.h:111`) and `ERR_WIENER_ARRAY` on overflow
+  (`mccc_wiener.c:115,183`) confirmed; the dphi cap forces rejections via
+  `hnext = -hin/dphi` (`simulate_gc_adaptive.c:220`), each parking a
+  future-time Wiener entry — the overflow account is consistent.
+- Physics stake of neglecting the wall: 3.7% of source weight (3.2% of
+  power) is born at rho > 0.9 (max birth rho 0.988); banana HALF-widths
+  (Bpol = (d/2)/R from psi = d^2/4, Bphi = 32.86/R; effective q = 8.4-9.4)
+  are Delta-rho = 0.09-0.20 for 33-100 keV D, so true wall losses at a
+  rho ~ 1.05 wall would be O(1%) of power — far inside every tolerance.
+  All 3086 markers end EMIN, max mileage 0.360 s < the 0.4 s cap.
+  The deviation is sound and defensible.
+
+**MAX_CPUTIME=480 s:** acceptable as a coarse guard given the documented
+per-lane accounting (10 s -> CPUMAX at 17 s wall); the real cap is the
+external `timeout 510`, and the endcond summary confirms no truncation
+(main run 131 s wall). **numpy-2 shims:** both reviewed — semantics match
+the removed/refused numpy-1 behavior, no-ops otherwise, vendored a5py
+untouched. Calibration logic (64 -> extrapolate -> floor/cap 500/4000,
+one documented relaxation fallback) matches the contract.
+
+### Verification of agent C's deliverable
+
+Suite runs 7 passed / 1 skipped; every measured number in the docstrings
+reproduces exactly (Pe +0.517, Pi -0.223, split +0.1405, sum -0.048,
+stored +0.194, L1 0.624, analytic peak rho 0.74, birth peak 0.66, axis bins
+46% of ASCOT peak).
+
+**Channel bands (0.80 / 0.32) — derivation verified, adjustment legitimate:**
+with frac_s = 0.237, split +/-0.15 abs and sum +/-10% give exactly
+Pe in [-67%, +80%], Pi in [-28%, +32%] (recomputed independently). The
+contract's "each within 20%" was indeed internally inconsistent with its own
+split tolerance for an ion-dominated plasma (a 0.15 split shift alone is a
+63% Pe-channel move). C kept the two binding physics gates and derived the
+channel bands from them — this is a principled resolution, not
+"measured plus margin". The real gate, the contract-original split 0.15,
+passes at 0.1405.
+
+**Density L1 0.70 — orbit-width claim verified quantitatively:** my
+independent banana-width estimate gives Delta-rho 0.09-0.20 (above), C's
+"0.1-0.15" is right (slightly conservative at full energy); |grad psi| =
+0.6 Wb/rad/m at rho 0.6 confirmed. Decisive check that this is NOT a
+normalization bug: the SHAPE-ONLY L1 (both profiles normalized to unit sum)
+is 0.631 ~ the raw 0.624 — the miss is dominated by profile shape (smearing
++ inward shift; ASCOT deposition-power centroid rho 0.506 vs birth 0.636),
+not by the +36% amplitude offset, and the amplitude offset itself decomposes
+into the reviewed lnL/E_c systematics. Tolerance justified.
+
+### Findings
+
+**BLOCKING: none.** All comparison results stand; no normalization or unit
+bug found on either side.
+
+**MINOR C1 — the documented explanation of the +5% power excess is
+quantitatively wrong (test_slowing_down.py module docstring items around
+lines 23-30, test_total_deposited_power_sum, and the "~+0.016" clause in
+test_electron_ion_split; also B's "5% slack: MC-noise" comment at
+run_ascot_reference.py:468).** The claim is that markers overshoot the
+20 keV endcond and the moments capture that sub-threshold deposition. The
+endstate refutes the magnitude: mean end energy is 19.80 keV (min 17.3), so
+`sum w (20keV - E_end)` = **2.7 kW** — under 10% of the 37.1 kW excess.
+The actual cause, verified in source and closed numerically: the
+`electron/ionpowerdep` moments are **gross drag** — `int f m v K` with only
+the friction coefficient K (`a5py/ascot5io/dist.py:835-900`) — and do not
+subtract the collisional energy-diffusion return flux `int f m Dpar`, which
+I evaluated over the accumulated dist via libascot: **45.9 kW** (8.7 e /
+37.2 i). Closure: gross 777.7 - return 45.9 = 731.7 kW vs the marker
+bookkeeping net `sum w (E0 - E_end)` = **743.3 kW** (1.6%, the residual
+being the 2.7 kW undershoot + out-of-box dwell + bin-center coefficient
+discretization). Net-vs-net the codes agree to **+0.4%** (743.3 vs 740.5) —
+a stronger result than the docstrings claim. No test outcome changes (the
+10% band covers gross-vs-net, and the net split moves only 0.237 -> 0.240),
+but the docstrings would misdirect anyone tightening tolerances later:
+fix the wording in both files (C's three passages, B's one comment).
+
+**MINOR C2 — the tau_th cross-check is dead code that need not be.**
+`test_tau_th_vs_ascot_mileage` probes meta keys (`mean_mileage_s`, ...) that
+`run_ascot_reference.py` never writes, so the factor-2 sub-check permanently
+skips. The needed quantity is derivable from the npz alone: mean
+thermalization time = inventory/source = `sum(density V)/sum(w)` = 0.0813 s
+(verified equal to the h5 weighted mean mileage, 0.0814 s). Against the
+core tau_th 0.138 s the ratio is 1.69 — the check would pass. Implement it
+via N/S and drop the meta-key probing (or have B add the mileage to meta).
+
+**MINOR B1 — extract() does not gate on endcond composition.** A
+CPUMAX/TLIM-truncated run (a quietly non-steady-state dist, biased low)
+would pass every verification check and write the npz; only the meta would
+tell. Add an assertion such as EMIN count >= 95% of n_markers next to the
+existing checks (this run: 3086/3086 EMIN, so no impact on the artifact).
+
+**NOTE 1 — npz `density`/`energy_density` are not the integral of `f_E`.**
+They include the >110 keV upscattered tail (1.02% of particles; energy
+diffusion pushes ~100 keV markers above the birth energy) and the sub-20 keV
+dwell (0.06%), while `f_E` is windowed to [20, 110] keV. Per-bin
+discrepancies reach 3.2%. Consistent and harmless for the tests as written
+(C's f_E-vs-density identity test is analytic-only), but undocumented in
+the npz meta — one sentence there would prevent surprise.
+
+**NOTE 2 — "traced orbits stay at rho <= 0.92" (write_options docstring)
+overstates confinement for the ensemble.** Births extend to rho 0.988 and
+the accumulated dist has (tiny) content in the [0.92, 1.0] bins. The correct
+defense of WALLHIT=0 is the quantified smallness above (~1% power at stake),
+which B's own numbers support — soften the sentence.
+
+**NOTE 3 — small docstring slips in C's files.** (a) The module header says
+the ASCOT density peak is at rho 0.58 (correct, bin 14) but item 2 says the
+peak "shifts ... to 0.50" — 0.51 is the deposition-power centroid, not the
+density peak. (b) In test_electron_ion_split, the clause blaming the Stix
+"v >> v_ti least accurate" regime is directionally dubious: at
+x = v/v_ti ~ 1.7-2.2 the Chandrasekhar G(x) is BELOW its 1/(2x^2)
+asymptote, i.e. the true ion drag is weaker, which would push ASCOT's Pe
+fraction UP, not down. The residual is instead carried by the
+orbit-shifted deposition into the hotter core (centroid rho 0.51 vs 0.64,
+local E_c x ~1.4 — listed in the same docstring) plus the gross-drag moment
+definition (MINOR C1). Trim the v_ti clause.
+
+**NOTE 4 — thin split margin.** The one contract-original gate, the Pe
+split, passes at 0.1405 vs 0.15. It is genuinely systematic (single-lnL
+E_c ~ +0.04, hotter-core orbit sampling ~ +0.08, moment definition ~ +0.01,
+threshold undershoot small) — but any future change to the analytic lnL
+convention or plasma scenario can push it over. Expected, honest, watch it.
+
+### Verdicts
+
+**Agent B (run_ascot_reference.py): APPROVE-WITH-MINOR.** Every extractable
+number was independently reproduced (weights exact, moments bit-identical,
+volumes 4.9e-4, steady-state normalization confirmed to 0.15% via the
+mileage route, E-xi conversion content-exact); the pmax correction and both
+numpy-2 shims are right; the WALLHIT=0 deviation is verified line-by-line
+in the C sources and its physics neglect bounded at O(1%) of power. MINOR:
+no endcond gate in extract() (B1) and one mislabeled "MC-noise" comment
+(shared with C1).
+
+**Agent C (test_slowing_down.py + run_sd_comparison.py): APPROVE-WITH-MINOR.**
+All reported metrics reproduce exactly; the channel-band tolerances are
+derived from the contract's own binding gates (not fitted to the data); the
+L1 relaxation is backed by a banana-width estimate this review confirms
+(shape-only L1 0.631 proves the miss is orbit-shape, not normalization);
+the suite is green (7 passed / 1 skipped). MINOR: the +5% power-excess
+explanation in the docstrings is quantitatively wrong (real cause:
+gross-drag moments vs net energy transfer; C1) and the tau_th cross-check
+is an eternally-skipping stub although the npz already contains what it
+needs (C2). Neither changes any pass/fail result.
