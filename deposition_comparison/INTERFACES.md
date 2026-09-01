@@ -151,3 +151,143 @@ def deposit_pencil(injector, eq, plasma, tables, rho_edges, *,
 Put the shared test scenario in `test_comparison.py` as `make_scenario()`
 (agent 5 owns it); agents 3 & 4 write their own minimal smoke checks inline
 under `if __name__ == "__main__":` with a scenario of their choosing.
+
+---
+
+# Phase 2: slowing-down distributions (analytic vs full ASCOT5)
+
+Goal: starting from the SAME beam-ion birth markers, compare the analytic
+steady-state slowing-down model (Stix) against a full `ascot5_main`
+guiding-center slowing-down simulation. ASCOT is compute-heavy: the reference
+run is calibrated first and hard-capped in wall time.
+
+Shared conventions for this phase:
+- SD rho grid: `rho_edges_sd = linspace(0, 1, 26)` (25 bins - coarser than
+  deposition, for statistics).
+- Energy grid: `e_edges_keV = linspace(20, 110, 46)` (2 keV bins).
+- Thermalization boundary: fixed `EMIN_KEV = 20.0`. ASCOT uses
+  `ENDCOND_MIN_ENERGY = 20e3` eV with `ENDCOND_MIN_THERMAL` set small enough
+  (0.1) that the fixed threshold dominates everywhere; the analytic model
+  integrates the slowing-down only from birth energy down to EMIN_KEV.
+- Steady state: BBNBI weights are particles/s, so ASCOT's time-accumulated
+  distribution IS the steady-state distribution; no extra normalization.
+- The analytic model consumes the exact birth markers (rho, energy, weight) of
+  the subset ASCOT simulates, carried in the npz below - deposition-method
+  differences cancel by construction.
+
+## `slowing_down.py` (agent A) - analytic model, JAX
+
+```python
+class SlowingDownResult(NamedTuple):
+    rho_edges: jnp.ndarray       # (nrho+1,)
+    e_edges_keV: jnp.ndarray     # (nE+1,)
+    f_E: jnp.ndarray             # (nrho, nE) steady-state fast-ion energy
+                                 # distribution [1/(m^3 keV)]
+    density: jnp.ndarray         # (nrho,) fast-ion density [m^-3]
+    energy_density: jnp.ndarray  # (nrho,) fast-ion energy density [J/m^3]
+    pe: jnp.ndarray              # (nrho,) power to electrons [W/m^3]
+    pi_: jnp.ndarray             # (nrho,) power to ions [W/m^3]
+    tau_th: jnp.ndarray          # (nrho,) full-energy thermalization time [s]
+
+def slowing_down(birth_rho, birth_energy_keV, birth_weight, eq, plasma,
+                 rho_edges, e_edges_keV, *, mass_amu, znum_beam=1,
+                 emin_keV=20.0) -> SlowingDownResult
+```
+Physics (all evaluated at bin-center rho from `physics.profiles`; document each
+formula with a reference in the docstring; jit + vmap over markers/bins):
+- Coulomb logarithm: NRL formulary, electron-ion form
+  `lnL = 24 - ln(sqrt(ne_cm3)/Te_eV)` for fast-ion-electron collisions and
+  a documented ion-ion form for fast-ion-ion collisions (state formulas;
+  reviewer will verify). Small differences vs ASCOT's internal clog are
+  acceptable and covered by comparison tolerances.
+- Spitzer slowing-down time on electrons `tau_se` (SI):
+  `tau_se = 3 (2 pi)^{3/2} eps0^2 m_b sqrt(m_e) (k Te)^{3/2}
+            / (Z_b^2 e^4 n_e lnL_e)`.
+- Critical velocity/energy: `v_c^3 = (3 sqrt(pi)/4) (m_e / n_e)
+  sum_i(n_i Z_i^2 / m_i) v_te^3` with `v_te = sqrt(2 k Te / m_e)`; `E_c` is
+  the kinetic energy of the beam species at `v_c`.
+- Steady-state distribution of a source S [1/(s m^3)] at birth speed v0:
+  `N(v) = S tau_se v^2 / (v^3 + v_c^3)` for v in (v_min, v0), 0 outside;
+  convert to per-energy via `N(E) = N(v) / (m_b v)`.
+- Fast-ion density/energy density: integrals of N(E) (analytic or accurate
+  quadrature on the energy grid).
+- Heating split: ion fraction at energy E is
+  `1 / (1 + (E/E_c)^{3/2})`; `P_i = sum_markers w * int_{Emin}^{E0}
+  frac_i(E) dE`, `P_e` likewise with `1 - frac_i`; per volume via
+  `common.shell_volumes`. Total `P_e + P_i` must equal
+  `sum w (E0 - Emin)` exactly (markers hand back Emin to the bulk at
+  thermalization; do NOT count it as deposited).
+- `tau_th = (tau_se / 3) ln(1 + (E0/E_c)^{3/2} ... )` evaluated from Emin to
+  E0 (use the exact integral, not the E_min=0 form).
+- Pitch is ignored (no pitch-angle scattering, no orbit effects) - document.
+
+Sanity block (`python -m deposition_comparison.slowing_down`): uniform test
+source at rho=0.05..0.15, checks: N(E) >= 0; density equals the closed-form
+`S tau_se/3 ln(1+(v0/vc)^3)`-type expression evaluated between Emin and E0;
+`P_e + P_i = sum w (E0 - Emin)` to 1e-12 rel; E0 >> Ec limit gives P_e
+dominant, E0 << Ec limit gives P_i dominant.
+
+## `run_ascot_reference.py` (agent B) - full ASCOT5 run
+
+Builds on the phase-1 `bbnbi_ref/ascot.h5` (BBNBI run with 100k markers,
+div=0.02 scenario). Steps:
+1. `make ascot5_main -j4` if `build/ascot5_main` is missing.
+2. Add dummy `Boozer` and `MHD_STAT` inputs (required by ascot5_main).
+3. Marker subset: random `n_sd` ionized markers from the BBNBI run via
+   `getstate_markers("gc", ids=...)`, weights scaled by
+   (total ionized weight / subset weight sum) so the subset carries the full
+   source rate; write as "gc" marker input.
+4. Options: SIM_MODE=2, ENABLE_ADAPTIVE=1, orbit following + Coulomb
+   collisions on, ENDCOND_ENERGYLIM=1 with MIN_ENERGY=20e3/MIN_THERMAL=0.1,
+   SIMTIMELIM + MAX_MILEAGE=0.4 (safety net), CPUTIMELIM + MAX_CPUTIME as an
+   extra guard, ENABLE_DIST_RHO5D=1 on the shared rho/E-compatible grid
+   (rho 25 bins on [0,1], theta/phi/time/charge 1 bin, ppar/pperp sized for
+   110 keV D: |p| <= 1.1e-19 kgm/s check numerically ~ sqrt(2 m E)),
+   with enough momentum bins (>= 100 x 50) for a clean E-xi conversion.
+5. CALIBRATE: run `timeout 510 build/ascot5_main --in=ascot --n?` no - marker
+   count is fixed by the marker input group, so write a SMALL marker group
+   first (64 markers), run, measure wall time, extrapolate linearly, then
+   choose `n_sd` so the main run finishes in <= 8 minutes wall
+   (`timeout 510`), floor 500 / cap 4000 markers. Then write the full marker
+   group + rerun. Report both timings.
+6. Extract to `deposition_comparison/sd_reference.npz`:
+   - `rho_edges`, `e_edges_keV` (the shared grids)
+   - `f_E (nrho, nE)` [1/(m^3 keV)]: rho5d dist -> exi conversion
+     (`getdist("rho5d", exi=True, ekin_edges=<J or eV per a5py API>)`),
+     integrate over theta/phi/pitch/charge/time, divide by shell volume
+     (`common.shell_volumes` values are exact for this equilibrium) and by
+     energy bin width.
+   - `density (nrho,)`, `energy_density (nrho,)`: momentum-space integrals of
+     the same dist.
+   - `pe (nrho,)`, `pi (nrho,)` [W/m^3]: `getdist_moments(dist,
+     "electronpowerdep", "ionpowerdep")` using libascot with inputs
+     initialized (bfield+plasma); resample/verify the moment grid matches
+     rho bins; if the moment machinery fails, fall back to writing whatever
+     IS extractable and document loudly in the npz meta and your report.
+   - `birth_rho`, `birth_energy_keV`, `birth_weight`: the subset's INISTATE
+     (BBNBI birth coordinates of exactly the simulated markers, scaled
+     weights) - the analytic model's source.
+   - meta: n_markers, wall time, endcond summary counts, option values.
+7. The h5 stays in bbnbi_ref/ (gitignored); the npz is committed.
+
+## `test_slowing_down.py` + `run_sd_comparison.py` (agent C)
+
+- Loads `sd_reference.npz`; runs `slowing_down()` on the npz birth arrays with
+  the same scenario plasma (import `make_scenario` from test_comparison,
+  div irrelevant).
+- Tests (pytest, no ASCOT execution - npz only; skip cleanly with a clear
+  message if npz missing so CI without the binary still passes):
+  - analytic internal consistency (the sanity checks from agent A's block);
+  - `P_e + P_i` volume-integrals agree between analytic and ASCOT within 20%
+    each, and their SUM within 10% (orbit losses make ASCOT lower);
+  - fast-ion stored energy (volume-integrated) within 25%;
+  - density profile shape: rel-L1 < 0.35 (orbit width smears);
+  - electron/ion split: analytic `P_e/(P_e+P_i)` within 0.15 absolute of
+    ASCOT's.
+  Tolerances are physics-motivated starting points: if a comparison fails,
+  INVESTIGATE (plot, check units/normalization) before loosening; report
+  any tolerance you change and why.
+- `run_sd_comparison.py`: figure `comparison_sd.png` with 4 panels:
+  (a) n_fast(rho), (b) P_e and P_i profiles (both methods),
+  (c) volume-integrated f(E) spectra, (d) f_E at one core rho bin;
+  annotate integrated powers and stored energy; stdout summary table.
