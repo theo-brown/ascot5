@@ -413,3 +413,46 @@ explanation in the docstrings is quantitatively wrong (real cause:
 gross-drag moments vs net energy transfer; C1) and the tau_th cross-check
 is an eternally-skipping stub although the npz already contains what it
 needs (C2). Neither changes any pass/fail result.
+
+### Response (agent B)
+
+All findings touching `run_ascot_reference.py` addressed (code/doc changes
+only; no ASCOT rerun; `sd_reference.npz` untouched, md5
+4f746e8ddbf1d01daf3a428345e2688c before and after):
+
+- **MINOR B1 (endcond gate):** `extract()` now gates on the endcond
+  composition before any npz write: zero reported errors, every marker
+  accounted for by a legitimate terminal condition (EMIN + TLIM + WALL ==
+  n_markers), and EMIN >= 95% of n_markers; otherwise it raises with the
+  full endcond/error breakdown and refuses to write. Dry-run verified: the
+  committed SDMAIN run (3086/3086 EMIN, no errors) passes; a synthetic
+  CPUMAX-truncated composition fails.
+- **MINOR C1 (my "5% slack: MC-noise" comment + explanation text):** the
+  comment at the deposited-power check now states the reviewer's verified
+  mechanism - `electron/ionpowerdep` are GROSS collisional drag
+  (friction-only `int f m v K`, a5py/ascot5io/dist.py), omitting the ~6%
+  diffusive energy-return flux `int f m Dpar` (45.9 kW = 8.7 e / 37.2 i),
+  so gross 777.7 kW vs net bookkeeping 743.3 kW; threshold overshoot is
+  only 2.7 kW, and net-vs-net agreement is ~0.4%. The same definition is
+  now in the `extract()` docstring and, for future runs, in
+  `meta_json["pe_pi_definition"]` (the committed npz's meta keeps its old
+  text, per instructions).
+- **NOTE 1 (density != integral f_E dE):** documented in the `extract()`
+  docstring and in `meta_json["f_E_window_note"]` for future runs: f_E is
+  windowed to [20, 110] keV while density/energy_density integrate the
+  full raw dist, so the ~1.02% >110 keV collisional-upscatter tail (plus
+  ~0.06% sub-20 keV dwell) makes per-bin deviations of up to 3.2%.
+- **NOTE 2 ("orbits <= rho 0.92" overstated):** the `write_options`
+  docstring no longer rests the WALLHIT=0 defense on the 4-orbit trace;
+  it now carries the quantified bound (3.7% of source weight born at
+  rho > 0.9, max birth rho 0.99, tiny dist content in [0.92, 1.0], banana
+  half-widths Delta-rho ~ 0.09-0.20 => true wall losses O(1%) of power),
+  plus a pointer to the new endcond gate.
+- **NOTE 3 (0.58-vs-0.50 density-peak slip):** not in my file -
+  `extract()` prints the density peak from argmax (0.58 for the committed
+  run); the slip is in agent C's module docstring.
+
+Validation after the edits: `py_compile` clean, module imports, `--help`
+parses (all three flags present), and no other file modified
+(`git status`: only `run_ascot_reference.py` + the npz remain untracked,
+npz hash unchanged).

@@ -245,10 +245,15 @@ def write_options(a5, max_mileage=0.4, tol_ccol=1e-1, tol_orbit=1e-8):
         ascot5.h) which then overflows: most markers abort with "Wiener
         array is full" (also with ADAPTIVE_TOL_ORBIT down to 1e-10).
       With WALLHIT=0 and default MAX_DPHI the same markers run cleanly
-      (all EMIN, no errors). Physics impact is negligible here: orbits in
-      this circular equilibrium are well confined (traced orbits stay at
-      rho <= 0.92; the wall sits at rho ~ 1.05), so wall losses are ~0
-      and the endcond summary is checked to confirm no aborts.
+      (all EMIN, no errors). Physics stake of neglecting the wall,
+      quantified (bound confirmed by the integration review): ~3.7% of the
+      source weight (~3.2% of power) is born at rho > 0.9 (max birth rho
+      0.99) and the accumulated dist has tiny content in the [0.92, 1.0]
+      bins, but banana half-widths here are only Delta-rho ~ 0.09-0.20
+      (33-100 keV D, effective q ~ 8-9), so true losses to the rho ~ 1.05
+      wall would be O(1%) of power - far inside every phase-2 tolerance.
+      The endcond summary is still gated in extract() to confirm no
+      aborts/truncations.
     - Distribution: ONLY rho5d, on the shared grid: 25 rho bins on [0,1],
       theta/phi/time/charge single bins, ppar in [-pmax, pmax] x 100 and
       pperp in [0, pmax] x 50 with pmax = sqrt(2 m_D 110 keV) ~ 1.09e-20
@@ -367,7 +372,25 @@ def calibrate(a5cls, bbnbi_tag, rng, n_cal):
 # Stage 7: extraction
 # ---------------------------------------------------------------------------
 def extract(eq, meta):
-    """Extract sd_reference.npz from the SDMAIN run and verify it."""
+    """Extract sd_reference.npz from the SDMAIN run and verify it.
+
+    Quantity definitions worth knowing before comparing (both confirmed by
+    the integration review, REVIEW_SD.md agent E section):
+
+    - ``density``/``energy_density`` are momentum integrals of the FULL raw
+      rho5d dist, while ``f_E`` is windowed to the shared [20, 110] keV
+      grid. Collisional energy diffusion upscatters ~1% of the particles
+      above the 110 keV grid edge (and ~0.06% of dwell sits below 20 keV),
+      so ``density != integral(f_E dE)`` by up to ~3.2% per bin. This is
+      windowing, not a conversion bug; consumers comparing f_E integrals
+      against density must expect it.
+    - ``pe``/``pi`` from a5py's electron/ionpowerdep moments are GROSS
+      collisional drag, ``integral(f m v K)`` with only the friction
+      coefficient K (a5py/ascot5io/dist.py); the diffusive energy-return
+      flux ``integral(f m Dpar)`` is NOT subtracted (~46 kW here, ~6% of
+      the gross). Hence sum((pe+pi)V) sits ~5% ABOVE the net marker
+      bookkeeping sum(w (E0 - Emin)); net-vs-net the codes agree to ~0.4%.
+    """
     import unyt
     from a5py import Ascot
     import a5py.physlib as physlib
@@ -434,8 +457,22 @@ def extract(eq, meta):
     birth_weight = np.asarray(w0)                                # particles/s
 
     ec, emsg = endcond_summary(run)
-    if emsg:
-        print(f"WARNING: run reported errors: {emsg}")
+
+    # --- endcond gate (review finding B1): refuse a truncated run ----------
+    # A CPUMAX/ABORTED/NONE-truncated run yields a quietly non-steady-state
+    # dist (biased low) that would otherwise pass every numeric check below.
+    # Require: zero errors, every marker accounted for by a legitimate
+    # terminal condition (EMIN, or the TLIM/WALL safety nets), and >= 95%
+    # actually thermalized (EMIN).
+    n_tot = int(birth_rho.size)
+    n_legit = sum(ec.get(k, 0) for k in ("EMIN", "TLIM", "WALL"))
+    n_emin = ec.get("EMIN", 0)
+    if emsg or n_legit != n_tot or n_emin < 0.95 * n_tot:
+        raise RuntimeError(
+            f"Endcond gate failed: endconds {ec} over {n_tot} markers "
+            f"(EMIN+TLIM+WALL = {n_legit}, EMIN = {n_emin}, need all "
+            f"accounted for and EMIN >= 95%), errors {emsg}. The run is "
+            "truncated or errored - refusing to write a corrupted npz.")
 
     # --- verification before writing ---------------------------------------
     e_j = 1.602176634e-19
@@ -465,7 +502,12 @@ def extract(eq, meta):
     if not moments_failed:
         checks += [
             ("deposited power > 0.3 MW", p_dep > 0.3e6),
-            # 5% slack: MC-noise in the collision-coefficient moments.
+            # NOT MC noise: pe/pi are GROSS collisional drag (friction-only
+            # moments; the ~6% diffusive energy-return flux is not
+            # subtracted - see the docstring / review MINOR C1), so the
+            # moment integral legitimately sits a few % above the net
+            # bookkeeping. 5% slack over BIRTH power still bounds it, since
+            # gross drag < birth minus the ~0.27 MW Emin hand-back.
             ("deposited power <= birth power", p_dep <= 1.05 * p_birth),
             ("pe, pi non-negative", bool(np.all(pe >= 0) and
                                          np.all(pi_ >= 0))),
@@ -482,6 +524,19 @@ def extract(eq, meta):
         "stored_energy_J": w_stored,
         "moment_volume_max_rel_dev": volratio,
         "emin_keV": EMIN_KEV, "seed": SEED,
+        # Definitions (review MINOR C1 / NOTE 1) for npz consumers:
+        "pe_pi_definition": (
+            "pe/pi are GROSS collisional drag moments int(f m v K) with "
+            "friction K only (a5py electron/ionpowerdep); the diffusive "
+            "energy-return flux int(f m Dpar) (~6% here) is not "
+            "subtracted, so sum((pe+pi)V) exceeds the net "
+            "sum(w (E0-Emin)) by ~5%; net-vs-net agreement is ~0.4%."),
+        "f_E_window_note": (
+            "density/energy_density integrate the FULL raw dist; f_E is "
+            "windowed to [20,110] keV and misses the ~1% of particles "
+            "collisionally upscattered above 110 keV (and ~0.06% dwell "
+            "below 20 keV): density != integral(f_E dE) by up to ~3.2% "
+            "per bin."),
     })
     np.savez(
         NPZ_OUT,
