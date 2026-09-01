@@ -120,10 +120,14 @@ Strictly, the Stix ``v_c^3`` expression carries the per-species ion-ion
 Coulomb logarithms relative to the electron one:
 ``v_c^3 propto sum_i (n_i Z_i^2 lnL_i / m_i) / (n_e lnL_e)``.  Here the SAME
 ``lnL_e`` is used for every channel (the ratio ``lnL_i / lnL_e`` is set to 1),
-as permitted by the module contract: for the scenario parameters the
-fast-ion-ion logarithm (NRL, counter-streaming-ion form) differs from
-``lnL_e`` by ~10-20%, shifting ``E_c`` by ~5% -- well inside the tolerances of
-the analytic-vs-ASCOT comparison, and documented here for the reviewer.
+as permitted by the module contract.  Quantitatively (physics-verifier
+review, recomputing ASCOT's ``mccc_coefs_clog`` for a 100 keV D ion at the
+scenario rho = 0.3 plasma): lnL_e = 17.71, lnL_D = 22.08, lnL_C = 20.76,
+i.e. an effective ``lnL_i / lnL_e ~ 1.24``, so this module's ``E_c`` is
+``~1.24^{2/3} ~ 15%`` LOW relative to ASCOT's effective critical energy.
+The resulting shift in the heating split ``P_i/(P_e+P_i)`` for the 100 keV
+component is ~0.03 absolute (0.818 here vs ~0.846 ASCOT-like) -- well inside
+the 0.15 split tolerance of the analytic-vs-ASCOT comparison.
 
 Model limitations (by design, per the contract)
 -----------------------------------------------
@@ -300,6 +304,21 @@ def slowing_down(birth_rho, birth_energy_keV, birth_weight, eq: Equilibrium,
     ``[rho_edges[0], rho_edges[-1])`` contribute nothing (masked with
     ``jnp.where``-style zero weights; no NaNs are generated).
 
+    .. warning::
+       **Energy-grid coverage limitation.** ``f_E`` only holds the part of
+       each marker's slowing-down content that lies inside
+       ``[e_edges_keV[0], e_edges_keV[-1]]``; a marker born ABOVE the grid
+       (``E0 > e_edges_keV[-1]``, or slowing through energies below
+       ``e_edges_keV[0]`` when ``emin_keV < e_edges_keV[0]``) has that tail
+       silently truncated from ``f_E``, while ``density``,
+       ``energy_density``, ``pe`` and ``pi_`` always carry the FULL
+       ``[emin_keV, E0]`` content — so ``sum(f_E * dE) < density`` for such
+       markers (e.g. ~11% of the particles of a 120 keV birth on the shared
+       20-110 keV grid).  The phase-2 comparison never hits this (max birth
+       energy 100 keV < 110 keV, ``emin_keV`` equals the grid minimum), but
+       choose grids with ``e_edges_keV[0] <= emin_keV`` and
+       ``e_edges_keV[-1] >= max(E0)`` if the results are reused.
+
     ``tau_th`` is the per-bin thermalization time of a full-energy ion,
     with "full energy" taken as the maximum birth energy over all markers
     (clamped to ``>= emin_keV``), slowing from that energy down to
@@ -405,10 +424,16 @@ def slowing_down(birth_rho, birth_energy_keV, birth_weight, eq: Equilibrium,
     # --- full-energy thermalization time per bin ---------------------------
     e_full_J = jnp.maximum(jnp.max(birth_energy_keV * _KEV_TO_J,
                                    initial=emin_J), emin_J)
+    # Compute BOTH cubes with the identical expression shape (2E/m)^1.5 so
+    # that the degenerate case e_full_J == emin_J cancels exactly (mixing
+    # sqrt(.)^3 with (.)^1.5 rounds differently and can leave log1p with a
+    # one-ulp-negative argument); the maximum(., 0) guard then makes
+    # tau_th >= 0 a hard invariant.
     v_full3 = (2.0 * e_full_J / m_b) ** 1.5
-    v_min3 = v_min**3
-    tau_th = (tau_se_b / 3.0) * jnp.log1p(
-        (v_full3 - v_min3) / (v_min3 + v_c_b**3))  # [s]
+    v_min3 = (2.0 * emin_J / m_b) ** 1.5
+    tau_th = jnp.maximum(
+        (tau_se_b / 3.0) * jnp.log1p((v_full3 - v_min3)
+                                     / (v_min3 + v_c_b**3)), 0.0)  # [s]
 
     return SlowingDownResult(rho_edges=rho_edges, e_edges_keV=e_edges_keV,
                              f_E=f_E, density=density,
@@ -543,6 +568,20 @@ def _sanity():
     assert rel_tau < 0.02, f"tau_se vs NRL practical formula: rel {rel_tau:.3e}"
     print(f"check 5: tau_se vs NRL 6.27e8 A Te^1.5/(Z^2 ne lnL): "
           f"rel {rel_tau:.2e} (< 0.02)  -- OK")
+
+    # -- check 6: degenerate case (no marker above Emin) -> tau_th >= 0 -----
+    r_deg = slowing_down(birth_rho, jnp.full(n_m, 15.0), birth_w, eq, plasma,
+                         rho_edges, e_edges_keV, mass_amu=mass_amu,
+                         emin_keV=emin_keV)
+    assert jnp.all(jnp.isfinite(r_deg.tau_th)), "degenerate tau_th not finite"
+    assert jnp.all(r_deg.tau_th >= 0.0), \
+        f"degenerate tau_th negative: min {float(jnp.min(r_deg.tau_th)):.3e}"
+    assert jnp.all(r_deg.f_E == 0.0) and jnp.all(r_deg.density == 0.0) \
+        and jnp.all(r_deg.pe == 0.0) and jnp.all(r_deg.pi_ == 0.0), \
+        "sub-threshold markers contributed"
+    print(f"check 6: all markers below Emin: tau_th >= 0 "
+          f"(min {float(jnp.min(r_deg.tau_th)):.1e}), all outputs zero  "
+          f"-- OK")
     print("\nscenario plasma (D + 2% C, ne0=8e19, te0=10 keV) at rho = 0.3:")
     print(f"  ne      = {float(ne3):.4e} m^-3, Te = {float(te3):.1f} eV, "
           f"lnL_e = {float(lnL3):.2f}")

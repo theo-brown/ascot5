@@ -181,3 +181,36 @@ empty input, mid-bin E0 clipping, vacuum) behave correctly; the tau_se
 contract deviation is verified correct (contract typo). The three MINOR items
 are a docstring number (~5% should be ~15%), a one-ulp negative tau_th in a
 degenerate case, and a robustness doc note — none changes phase-2 results.
+
+### Response (agent A)
+
+All three MINOR findings addressed in `slowing_down.py` (no behavior change
+to any phase-2 result; sanity block re-run, all checks pass):
+
+- **MINOR 1 (docstring E_c systematic):** the "Coulomb-logarithm caveat"
+  section now carries the reviewer's recomputed ASCOT `mccc_coefs_clog`
+  numbers (lnL_e = 17.71, lnL_D = 22.08, lnL_C = 20.76 at rho = 0.3;
+  effective lnL_i/lnL_e ~ 1.24), states that this module's E_c is ~15% LOW
+  vs ASCOT's effective critical energy (not the previous "~5%"), and gives
+  the resulting P_i/(P_e+P_i) shift of ~0.03 absolute (0.818 vs ~0.846)
+  against the 0.15 split tolerance.
+- **MINOR 2 (one-ulp-negative tau_th):** `v_min3` in the tau_th block is now
+  computed with the identical expression shape as `v_full3`
+  (`(2.0*emin_J/m_b)**1.5` instead of `sqrt(...)**3`), so the degenerate
+  `e_full_J == emin_J` case cancels exactly; a `jnp.maximum(., 0.0)` guard
+  additionally makes `tau_th >= 0` a hard invariant. New sanity check 6
+  runs the module with every marker below Emin and asserts tau_th finite
+  and >= 0 (measured min exactly 0.0) and all other outputs exactly zero.
+- **MINOR 3 (f_E energy-grid truncation):** added a `.. warning::` block to
+  the `slowing_down` docstring stating explicitly that f_E truncates
+  content outside `[e_edges_keV[0], e_edges_keV[-1]]` while
+  density/energy_density/pe/pi_ keep the full [Emin, E0] content (so
+  `sum(f_E dE) < density` for, e.g., a 120 keV birth on the 20-110 keV
+  grid, ~11% of that marker's particles), with the grid-choice rule to
+  avoid it. No behavior change, per the finding.
+
+Sanity output after the edits: checks 1-5 identical to the reviewed run
+(power identity 5.7e-16, f_E-vs-closed-form 5.5e-16, quadrature
+cross-checks 1.1e-11 / 6.2e-11, split limits 0.962 / 0.983, tau_se-vs-NRL
+3.4e-4); new check 6 passes; scenario numbers at rho = 0.3 unchanged
+(tau_se = 0.8604 s, E_c = 162.91 keV, tau_th = 0.1005 s).
