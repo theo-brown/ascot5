@@ -231,6 +231,10 @@ def main():
           "ASCOT's Pe fraction 0.237; the L1 reflects the wide banana\n"
           "    orbits (weak poloidal field, effective q ~ 10) absent from "
           "the analytic model.")
+    print("  note: the ASCOT pe/pi are a5py's GROSS-drag powerdep moments "
+          "(friction only,\n    energy-diffusion return flux ~46 kW not "
+          "subtracted); net-vs-net the codes\n    agree to +0.4% "
+          "(ASCOT sum w(E0-E_end) = 743.3 kW vs analytic 740.5 kW).")
     print(f"\n  cost: analytic {t_first * 1e3:.0f} ms cold "
           f"/ {t_steady * 1e3:.1f} ms warm on CPU; "
           f"ASCOT5 {float(ref['wall_s']):.1f} s wall for "

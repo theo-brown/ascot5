@@ -414,6 +414,43 @@ gross-drag moments vs net energy transfer; C1) and the tau_th cross-check
 is an eternally-skipping stub although the npz already contains what it
 needs (C2). Neither changes any pass/fail result.
 
+### Response (agent C)
+
+All findings touching my files addressed in `test_slowing_down.py` and
+`run_sd_comparison.py` (no tolerance value changed; suite now 8 passed /
+0 skipped):
+
+- **MINOR C1 (wrong +5% explanation):** all three passages rewritten — the
+  module-docstring reference block, `test_power_identity`, and
+  `test_total_deposited_power_sum` now state the verified cause: the a5py
+  `electron/ionpowerdep` moments are GROSS drag (`int f m v K`, friction
+  only) omitting the energy-diffusion return flux `int f m Dpar` = 45.9 kW;
+  threshold overshoot is only 2.7 kW (mean end energy 19.80 keV); net-vs-net
+  agreement is +0.4% (743.3 vs 740.5 kW). The `run_sd_comparison` stdout
+  footnote carries the same gross-vs-net note. The figure was regenerated;
+  its panel text never contained the wrong explanation, so the plots are
+  unchanged.
+- **MINOR C2 (dead tau_th check):** `test_tau_th_vs_ascot_mileage` now
+  computes ASCOT's mean thermalization time from the npz alone via the
+  steady-state identity `<tau> = sum(density V) / sum(birth_weight)` =
+  0.0813 s and asserts the analytic core-bin tau_th (0.138 s, full-energy)
+  is within a factor 2 (ratio 1.69, passes). The meta-key probing and the
+  skip path are gone; the mileage-cap consistency assert is kept.
+- **NOTE 3a (0.50 vs 0.58):** the module docstring and
+  `test_density_profile_shape` now distinguish the density peak bin (0.58,
+  on a broad rho ~ 0.44-0.58 plateau) from the deposition-power centroid
+  (0.51 vs birth 0.64), and cite the reviewer's shape-only L1 (0.631).
+- **NOTE 3b (v/v_ti clause directionally backwards):** the clause is
+  removed from `test_electron_ion_split`; the residual is now attributed
+  per this review — hotter-core orbit sampling (~+0.08, local E_c x ~1.4),
+  single-lnL E_c (~+0.04, agent D), gross-drag moment definition (~+0.01;
+  net split 0.240), threshold undershoot small.
+- **NOTE 4 (thin split margin):** `test_electron_ion_split` now carries an
+  explicit "Do NOT widen this tolerance" comment acknowledging the 0.1405
+  vs 0.15 margin, citing agent D's quantified E_c systematic as the cause
+  and flagging that a future lnL-convention or scenario change pushing it
+  over is a physics regression to investigate, not a tolerance to relax.
+
 ### Response (agent B)
 
 All findings touching `run_ascot_reference.py` addressed (code/doc changes

@@ -21,13 +21,18 @@ Reference numbers baked into the npz (verified at test-writing time)
   density peak at rho = 0.58; all 3086 markers end with EMIN
   (no orbit/wall losses; ENDCOND_WALLHIT = 0).
 - The analytic identity target ``sum w (E0 - Emin)`` = 0.7405 MW.  ASCOT's
-  deposited total is ~5% ABOVE it because markers overshoot the fixed
-  20 keV threshold within their last collisional (adaptive) step and the
-  time-accumulated moments capture that below-threshold deposition, whereas
-  the analytic model by definition stops handing out energy exactly at
-  Emin.  The internal power-balance test therefore checks the analytic
-  identity, and the cross-code test compares deposited totals directly with
-  that ~5% one-sided offset inside its 10% band.
+  npz total is ~5% ABOVE it because the ``electron/ionpowerdep`` moments
+  are GROSS collisional drag, ``int f m v K`` with only the friction
+  coefficient K — they do not subtract the collisional energy-diffusion
+  return flux ``int f m Dpar`` (~45.9 kW over this dist; agent E review,
+  REVIEW_SD.md MINOR C1).  Threshold overshoot is NOT the cause: the mean
+  end energy is 19.80 keV, worth only 2.7 kW of the 37.1 kW excess.
+  Net-vs-net the codes agree to +0.4% (ASCOT marker bookkeeping
+  ``sum w (E0 - E_end)`` = 743.3 kW vs the analytic 740.5 kW).  The
+  internal power-balance test therefore checks the analytic identity, and
+  the cross-code test compares the analytic net against ASCOT's gross
+  moments directly, with that ~5% one-sided definitional offset inside its
+  10% band.
 
 Tolerance adjustments vs the phase-2 contract (all investigated, see
 REVIEW_SD.md and the per-test comments):
@@ -39,12 +44,15 @@ REVIEW_SD.md and the per-test comments):
 2. density profile rel-L1: contract 0.35 -> 0.70.  The scenario's poloidal
    field is weak (|grad psi| ~ 0.6 Wb/rad/m at mid-radius over B_phi = 5.3 T
    -> effective q ~ 10), so 33-100 keV D banana widths are Delta-rho ~
-   0.1-0.15; ASCOT's density peak shifts inward from the birth peak (0.66)
-   to 0.50 and the axis bins are ~45% of peak, where the orbit-free analytic
-   model has exactly zero.  Observed rel-L1 = 0.62, dominated by this
-   documented finite-orbit-width smearing plus a +36% total-content offset
-   (single-lnL convention and near-threshold depletion in ASCOT, where
-   energy diffusion sweeps markers across 20 keV faster than pure drag).
+   0.1-0.15 (agent E: 0.09-0.20); ASCOT's density profile flattens onto a
+   broad inboard plateau (rho ~ 0.44-0.58, peak bin at 0.58) vs the
+   analytic peak at 0.74, its deposition-power centroid shifts inward to
+   rho 0.51 from the birth centroid 0.64, and the axis bins are ~45% of
+   peak where the orbit-free analytic model has exactly zero.  Observed
+   rel-L1 = 0.62, dominated by this finite-orbit-width smearing
+   (shape-only L1 with both profiles normalized is 0.631) plus a +36%
+   total-content offset (single-lnL convention and near-threshold
+   depletion in ASCOT's energy-diffusing operator).
 """
 import json
 import pathlib
@@ -132,10 +140,10 @@ def test_power_identity(ref, analytic, volumes):
 
     The Emin handed back to the bulk at thermalization is NOT deposited
     power, so the identity target is w*(E0 - Emin), not w*E0. This is the
-    correct analytic power-balance quantity; ASCOT's deposited total sits
-    ~5% above it for the sub-threshold-overshoot reason in the module
-    docstring, which is why the cross-code test below is a separate, looser
-    comparison.
+    correct analytic power-balance quantity; ASCOT's npz total sits ~5%
+    above it because its powerdep moments are gross drag (see
+    test_total_deposited_power_sum), which is why the cross-code test below
+    is a separate, looser comparison.
     """
     p_dep = float(np.sum((np.asarray(analytic.pe)
                           + np.asarray(analytic.pi_)) * volumes))
@@ -173,12 +181,19 @@ def test_density_equals_fE_integral(ref, analytic):
 def test_total_deposited_power_sum(ref, analytic, volumes):
     """Volume-integrated P_e + P_i agrees between the codes within 10%.
 
-    Analytic total = the identity sum w(E0-Emin) = 0.7405 MW; ASCOT total =
-    0.7777 MW. ASCOT is ~5% HIGH (one-sided): its adaptive collisional step
-    carries each marker slightly below the fixed 20 keV endcond before it
-    fires, and that below-threshold deposition is accumulated in the moments
-    (all 3086 markers end with EMIN; there are no orbit/wall losses in this
-    scenario that could push ASCOT low). Observed rel diff: -4.8%.
+    Analytic total = the identity sum w(E0-Emin) = 0.7405 MW (a NET energy
+    transfer by construction); ASCOT npz total = 0.7777 MW. ASCOT is ~5%
+    HIGH (one-sided) for a definitional reason (agent E, REVIEW_SD.md MINOR
+    C1): the a5py ``electron/ionpowerdep`` moments are GROSS drag,
+    ``int f m v K`` with only the friction coefficient, omitting the
+    energy-diffusion return flux ``int f m Dpar`` = 45.9 kW that a net
+    accounting subtracts. Threshold overshoot contributes almost nothing
+    (mean end energy 19.80 keV -> 2.7 kW). Net-vs-net the codes agree to
+    +0.4%: ASCOT's marker bookkeeping sum w(E0 - E_end) = 743.3 kW vs
+    740.5 kW analytic (all 3086 markers end with EMIN; no orbit/wall losses
+    in this scenario that could push ASCOT low). The 10% band therefore
+    compares gross-vs-net and passes with the definitional offset inside
+    it. Observed rel diff: -4.8%.
     """
     a, s = _integrals(ref, analytic, volumes)
     rel = (a["pe"] + a["pi"] - s["pe"] - s["pi"]) / (s["pe"] + s["pi"])
@@ -188,16 +203,22 @@ def test_total_deposited_power_sum(ref, analytic, volumes):
 def test_electron_ion_split(ref, analytic, volumes):
     """Analytic Pe/(Pe+Pi) within 0.15 absolute of ASCOT's.
 
-    Observed: analytic 0.377 vs ASCOT 0.237 -> delta = +0.140, inside but
-    close to the 0.15 tolerance. The margin is real, not luck — the shift
-    decomposes into quantified systematics, all pushing the SAME way
-    (REVIEW_SD.md NOTE 2): single-lnL E_c ~15% low -> +0.040 on the Pe
-    fraction (recomputed on these markers); ASCOT's ~37 kW sub-threshold
-    deposition landing almost entirely on ions -> ~+0.016; the remainder
-    (~+0.08) from ASCOT's full thermal collision operator (the 33/50 keV
-    components have v/v_ti ~ 1.8-2.2 at Ti = 10 keV, where the Stix
-    v >> v_ti ion-drag form is least accurate) plus orbit-shifted markers
-    sampling the hotter core (higher E_c -> more ion heating).
+    Observed: analytic 0.377 vs ASCOT 0.237 -> delta = +0.1405, inside the
+    0.15 tolerance but with only 0.0095 to spare. The margin is thin but
+    the shift is genuinely systematic, not luck — it decomposes into
+    quantified effects all pushing the SAME way (REVIEW_SD.md NOTE 2 /
+    agent E NOTE 4): single-lnL E_c ~15% low (agent D's recomputation of
+    ASCOT's mccc_coefs_clog) -> +0.04 on the Pe fraction; orbit-shifted
+    deposition into the hotter core (power centroid rho 0.51 vs birth 0.64,
+    local E_c x ~1.4 -> more ion heating) -> ~+0.08; the gross-drag moment
+    definition (see test_total_deposited_power_sum; net split is 0.240 vs
+    gross 0.237) -> ~+0.01; threshold undershoot small.
+
+    Do NOT widen this tolerance: it is the contract-original binding gate,
+    and the decomposition above is exactly what it is meant to bound. If a
+    future change to the analytic lnL convention or the plasma scenario
+    pushes it over, that is a real physics regression to investigate, not a
+    tolerance to relax.
     """
     a, s = _integrals(ref, analytic, volumes)
     frac_a = a["pe"] / (a["pe"] + a["pi"])
@@ -247,15 +268,18 @@ def test_density_profile_shape(ref, analytic):
 
     TOLERANCE ADJUSTED from the contract's 0.35 to 0.70 after investigation
     (module docstring, item 2): this scenario's poloidal field is weak
-    (effective q ~ 10), so banana widths reach Delta-rho ~ 0.15 and ASCOT's
-    profile is both smeared and shifted inward (peak at rho = 0.50 vs the
-    birth/analytic peak at 0.66-0.74; axis bins at ~45% of peak where the
-    orbit-free model is exactly zero) — the finite-orbit-width systematic
-    REVIEW_SD.md flags, just larger than the contract writer assumed because
-    of the low-current equilibrium. On top of the shape difference sits a
-    +36% total-content offset (analytic tau_se/vc^3 high from the single-lnL
-    convention; ASCOT's near-threshold depletion by energy diffusion).
-    Observed rel-L1 = 0.62.
+    (effective q ~ 10), so banana widths reach Delta-rho ~ 0.1-0.2 and
+    ASCOT's profile is both smeared and shifted inward (a broad plateau at
+    rho ~ 0.44-0.58 with the peak bin at 0.58 vs the analytic peak at 0.74;
+    power centroid rho 0.51 vs birth 0.64; axis bins at ~45% of peak where
+    the orbit-free model is exactly zero) — the finite-orbit-width
+    systematic REVIEW_SD.md flags, just larger than the contract writer
+    assumed because of the low-current equilibrium. Agent E's shape-only
+    check (both profiles normalized to unit content: L1 = 0.631 ~ raw
+    0.624) confirms the miss is orbit-shape-dominated, not a normalization
+    bug. On top sits a +36% total-content offset (analytic tau_se/vc^3 high
+    from the single-lnL convention; ASCOT's near-threshold depletion by
+    energy diffusion). Observed rel-L1 = 0.62.
     """
     dens_a = np.asarray(analytic.density)
     dens_s = ref["density"]
@@ -263,15 +287,24 @@ def test_density_profile_shape(ref, analytic):
     assert l1 < 0.70, f"density profile rel-L1 {l1:.3f} exceeds 0.70"
 
 
-def test_tau_th_vs_ascot_mileage(ref, analytic):
+def test_tau_th_vs_ascot_mileage(ref, analytic, volumes):
     """Core-bin thermalization time within a factor 2 of ASCOT's mean
-    thermalization mileage — IF the npz meta carries one.
+    thermalization time, derived from the npz alone.
 
-    The current meta_json only records the ENDCOND_MAX_MILEAGE *limit*
-    (0.4 s, a safety cap) and endcond counts, not the mean marker mileage,
-    so this sub-check skips gracefully. Weak indirect check kept: every
-    marker thermalized (endcond EMIN == n_markers) within the 0.4 s cap,
-    so the analytic tau_th must also lie below it.
+    In steady state the fast-ion inventory obeys N = S * <tau>, so ASCOT's
+    weighted mean thermalization mileage is computable from the npz without
+    any meta field (agent E, REVIEW_SD.md MINOR C2 — this replaces an
+    earlier version that probed meta keys agent B never writes and hence
+    always skipped):
+
+        <tau> = sum(density * V) / sum(birth_weight) = 0.0813 s
+
+    verified by agent E against the h5 endstate's weighted mean mileage
+    (0.0814 s; the 0.15% residual is dwell outside the dist box). The
+    analytic core-bin tau_th is the FULL-energy (100 keV) thermalization
+    time while <tau> averages over the 100/50/33 keV component mix, so
+    they differ by design — hence the loose factor-2 gate. Observed:
+    core tau_th 0.138 s vs 0.0813 s, ratio 1.69.
     """
     meta = ref["meta"]
     tau_core = float(np.asarray(analytic.tau_th)[int(np.argmax(ref["density"]))])
@@ -286,16 +319,10 @@ def test_tau_th_vs_ascot_mileage(ref, analytic):
                 f"analytic core tau_th {tau_core:.3f} s exceeds the mileage "
                 f"cap {cap} s that every ASCOT marker thermalized within")
 
-    mean_mileage = None
-    for key in ("mean_mileage_s", "mean_mileage", "mileage_mean_s",
-                "mean_thermalization_s", "mean_therm_mileage_s"):
-        if key in meta:
-            mean_mileage = float(meta[key])
-            break
-    if mean_mileage is None:
-        pytest.skip("meta_json has no mean thermalization mileage field "
-                    "(only the ENDCOND_MAX_MILEAGE limit); factor-2 tau_th "
-                    "sub-check not applicable")
-    assert mean_mileage / 2.0 < tau_core < mean_mileage * 2.0, (
-        f"core tau_th {tau_core:.3f} s vs ASCOT mean mileage "
-        f"{mean_mileage:.3f} s: outside factor 2")
+    inventory = float(np.sum(ref["density"] * volumes))     # particles
+    source = float(np.sum(ref["birth_weight"]))             # particles/s
+    assert source > 0
+    tau_mean_ascot = inventory / source                     # [s]
+    assert tau_mean_ascot / 2.0 < tau_core < tau_mean_ascot * 2.0, (
+        f"core tau_th {tau_core:.3f} s vs ASCOT mean thermalization time "
+        f"{tau_mean_ascot:.4f} s (inventory/source): outside factor 2")
