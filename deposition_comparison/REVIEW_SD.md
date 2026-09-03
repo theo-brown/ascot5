@@ -493,3 +493,189 @@ Validation after the edits: `py_compile` clean, module imports, `--help`
 parses (all three flags present), and no other file modified
 (`git status`: only `run_ascot_reference.py` + the npz remain untracked,
 npz hash unchanged).
+
+## Review of ladder pitch relaxation (reviewer)
+
+Independent physics review of the `pitch_scattering=True` branch of
+`ladder_sd` in `/home/user/ascot5/deposition_comparison/sd_ladder.py`
+(lines ~93-146) and the associated docstring/comment claims. Method: full
+re-derivation of the Gaffey/Cordey moment decay from the Trubnikov
+fast-ion-limit collision coefficients; scipy ODE cross-check of the closed
+form; numerical audit of the Gauss-Hermite node construction, the clip, the
+variance bound, and the flat-index broadcasting; execution of `ladder_sd`
+on a 5-cell synthetic case (200-step orbits; no ASCOT binary, no
+`__main__`). Scratch scripts (session scratchpad, not committed):
+`check_physics.py`, `check_nodes.py`, `check_ladder_small.py`.
+
+### Verdict: APPROVE-WITH-MINOR
+
+The physics is right and the implementation matches it. The exponent
+`<P_l> = P_l(xi0) X^{l(l+1) beta/6}` with `beta = Zeff/[Z]` is exactly what
+the standard fast-ion (v_ti << v << v_te) test-particle operator gives, the
+code's moment algebra and quadrature are correct, and power balance is
+provably untouched (node weights sum to 1; verified 2e-15 in execution).
+Two minor issues (stale module docstring; the clip silently breaking the
+"matches both moments" claim at low rungs) and several quantified notes.
+
+### a. Derivation audit — all four claimed steps verified
+
+1. **Coefficients and the v_c^3 identity (exact).** With
+   `Gamma_i = n_i Z_i^2 Z_b^2 e^4 lnL / (4 pi eps0^2 m_b^2)`, the fast-ion
+   limits are `dv_par/dt = -(1+m_b/m_i) Gamma_i/v^2`,
+   `<dv_perp^2>/dt = 2 Gamma_i/v`. The *speed* drag adds the spherical
+   correction `+<dv_perp^2>/(2v dt)`, so
+   `dv/dt|_i = -(m_b/m_i) Gamma_i/v^2` — i.e. Stix's `v_c^3/(tau_se v^2)`
+   term is the energy-equivalent drag, and the `(1+m_b/m_i)` vs `m_b/m_i`
+   bookkeeping is consistent (energy to ions `= Gamma_i m_b^2/(m_i v)`).
+   Recomputing `sum_i Gamma_i m_b/m_i` against the module's
+   `v_c^3/tau_se` at rho=0.3: **agreement to 2.2e-16** (the algebraic
+   identity is exact — I confirmed the prefactors cancel symbolically:
+   `3(2pi)^{3/2}/(4pi) = (3 sqrt(pi)/4) 2^{3/2}`).
+2. **Legendre decay rate (factor verified).** Writing the pitch operator
+   as `(nu/2) d/dxi[(1-xi^2) d/dxi]`, an initial `delta(xi-1)` gives
+   `d<theta^2>/dt = 2 nu`, so `nu = nu_perp/2` with
+   `nu_perp = <dv_perp^2>/(v^2 dt) = sum_i 2 Gamma_i/v^3`. Eigenvalues:
+   `<P_1>` decays at `nu_perp/2`, `<P_2>` at `3 nu_perp/2` — the claimed
+   factors are right (a classic factor-of-2 trap, checked two ways).
+3. **Exponent.** Dividing by the drag `dv/dt` and using
+   `sum Gamma_i = (Zeff/[Z]) sum Gamma_i m_b/m_i = beta v_c^3/tau_se`
+   gives `d ln<P_l>/dv = (l(l+1) beta/2) v_c^3 / (v (v^3+v_c^3))`, and
+   `int v_c^3 dv/(v(v^3+v_c^3)) = (1/3) ln(v^3/(v^3+v_c^3))`, hence
+   `<P_l> = P_l(xi0) X^{l(l+1) beta/6}` exactly as coded
+   (`X**(beta/3)` for the mean, `X**beta` for P2). Independent of Gaffey's
+   paper (no internet), the closed form follows from first principles.
+4. **beta.** `beta = Zeff/[Z]`, `[Z] = sum_i (n_i Z_i^2/n_e)(m_b/m_i)`,
+   falls straight out of the Gamma sums; the code's
+   `zeff/zbar` lines implement it verbatim (quasineutrality makes
+   `sum n_i Z_i = n_e`, so the code's denominator is fine).
+
+### b. ODE cross-check (scipy, rtol 1e-12)
+
+Coupled `dv/dt = -(v/tau_se)(1+v_c^3/v^3)`,
+`d<P_1>/dt = -(nu_perp/2)<P_1>`, `d<P_2>/dt = -(3nu_perp/2)<P_2>` with
+`nu_perp = 2 sum_i Gamma_i/v^3` built from the raw per-species Gamma's
+(rho=0.3 scenario plasma, 100 -> 20 keV D):
+
+- `max |P1_ode / X^(beta/3) - 1| = 3.3e-14`
+- `max |P2_ode / X^beta - 1| = 9.5e-13`
+- at 20 keV: `X = 0.1405`, `X^(beta/3) = 0.354`, `X^beta = 0.044`.
+
+Closed form and ODE are the same physics to integrator precision.
+
+### c. beta values
+
+- Scenario plasma (D + 2% C, quasineutral n_D = 0.88 n_e): `Zeff = 1.600`,
+  `[Z] = 1.00705`, **`beta = 1.5888`** (expected ~1.6). The code path
+  reproduces exactly this per cell (checked by executing the branch's own
+  lines: 1.58879897, all cells).
+- Pure-D plasma: `beta = m_D/m_b` — **exactly 1 only when the beam mass
+  equals the plasma-ion mass**. With this package's `anum = 2.0` plasma D
+  and `mass_amu = 2.0141` beam, beta = 0.9930, not 1.0 (see NOTE-1).
+
+### d. Code-branch audit
+
+- **Moment algebra:** `<xi^2> = (1+2<P_2>)/3` correct
+  (`P_2 = (3 xi^2-1)/2`). `<xi^2> <= 1` always (P2 in [-1/2, 1], X in
+  [0,1]).
+- **Variance bound:** `Var(t) = 1/3 - t^3/3 + xi0^2 (t^3 - t^2)` with
+  `t = X^{beta/3}` — minimized at `xi0^2 = 1`, where it equals
+  `1/3 + 2t^3/3 - t^2 >= 0` on [0,1] (zero only at t=1). Proven
+  analytically and scanned numerically (grid min = -1.1e-16, pure
+  roundoff); the `jnp.clip(..., 0.0)` guard is exactly right. As X -> 0
+  the construction correctly limits to the isotropic `<xi^2> = 1/3` with
+  nodes {-1, 0, +1} x {1/6, 2/3, 1/6}.
+- **Gauss-Hermite rule:** nodes `mu, mu +- sqrt(3) sigma`, weights
+  `2/3, 1/6, 1/6` reproduce Gaussian raw moments 0-5 exactly (checked to
+  1e-15); first error is the 6th standardized moment (9 vs 15). Since only
+  mean and variance of the (non-Gaussian) Gaffey distribution are known,
+  matching them exactly plus zero skew is the appropriate closure.
+- **Broadcasting/ordering:** flat index (cell, rung, node) is consistent
+  across `vr`/`xif`/`Rf`/`zf`/`Bf` and the
+  `frac_n.reshape(-1, L, nnode, nbin)` + `einsum("n,clnb->clb", ...)`
+  node average (verified element-by-element against a manual loop).
+  Weights sum to 1, so the pitch branch cannot perturb band contents:
+  executed power balance rel. error 2.0e-15 on the synthetic case, all
+  outputs finite for xi0 in {-0.4, 0.2, 0.6, 0.9, 0.99}.
+- **Non-scattering branch** unchanged: `(ncell, L, 1)` nodes with
+  weight [1.0]; validation-1 equivalence logic untouched.
+
+### Findings
+
+- **MINOR-1 (stale module docstring).** The header docstring (lines
+  25-30) still says "pitch-angle scattering is NOT modelled — that spread
+  is the known remaining physics". That is now false for
+  `pitch_scattering=True`; the Gaffey model is only described in an inline
+  comment. The module docstring should describe the option (and its
+  moment-matched 3-node closure + clip).
+- **MINOR-2 (clip silently breaks the exact-moment claim).** The comment
+  says the three nodes "match both moments and sum to 1, so power balance
+  is untouched". Power balance: true. Moments: the `clip(-0.999, 0.999)`
+  activates over much of the low-rung domain (a node exceeds 1 whenever
+  `mu + sqrt(3) sigma > 1`; e.g. xi0 = 0.9, X = 0.14 gives node 1.190).
+  Worst case over the scenario's X-range (X >= 0.14): mean shifted by up
+  to **0.035** and `<xi^2>` by up to **0.077** absolute (example: xi0=0.9,
+  X=0.14: mean 0.318 -> 0.286, <xi^2> 0.354 -> 0.285). Not blocking — the
+  true bounded distribution has no mass beyond |xi|=1 either, so the
+  clipped nodes are arguably closer to reality than the raw Gaussian
+  nodes, and the orbit kernel is only mildly pitch-sensitive at the
+  affected (lowest) rungs — but the comment overclaims; either document
+  the bounded-domain bias or renormalize (e.g. reflect the excess into
+  the node position while preserving the first moment).
+- **NOTE-1 (like-species anchor).** "beta = 1 for a like-species plasma"
+  holds only for m_b == m_i. With this package's plasma D at anum = 2.0
+  and beam at 2.0141 amu, a pure-D case gives beta = 0.9930. Comment-level
+  precision only.
+- **NOTE-2 (electron deflection, quantified — neglect justified).** Exact
+  erf-form `nu_perp^e / nu_perp^i` for D in the scenario rho=0.3 plasma
+  (ne = 6.94e19, Te = 8.69 keV): **0.016 at 30 keV, 0.020 at 50 keV,
+  0.027 at 100 keV** (small-x estimate `(4/(3 sqrt(pi)))(v/v_te)/Zeff`
+  agrees). Neglecting it is fine at the 2% level. Caveat of the same
+  order: the asymptotic `2 Gamma_i/v^3` overestimates the exact-erf ion
+  deflection near v_min (exact/asymptotic = 0.91 at 30 keV, Ti = Te), and
+  the two neglected corrections partially cancel; integrating the full
+  erf ODE (ions + electrons) changes the 20-keV endpoint by +5.2% on
+  `<P_1>` and +16% relative (+0.007 absolute) on `<P_2>` — i.e. ~0.005
+  absolute on `<xi^2>`. Well below the model's other approximations.
+- **NOTE-3 (single Coulomb log).** With per-species ion logs (lnL_D =
+  22.08, lnL_C = 20.76 vs lnL_e = 17.71, from the earlier verified
+  review), beta = 1.557 vs the single-lnL 1.589 (**-2.0%**). Both
+  numerator and denominator of beta are ion channels, so most of the
+  lnL_i/lnL_e ~ 1.24 factor cancels; immaterial.
+- **NOTE-4 (redundant recompute).** Line 117 calls
+  `_local_sd_quantities(plasma, centers, m_b, 1.0)` again for `vc_b`; the
+  identical `v_c` from line 77 could be indexed (`v_c[idx_b]`). Wasted
+  work only, no correctness impact.
+- **NOTE-5 (one-point birth-surface evaluation).** beta and v_c for the
+  pitch history are taken at the birth-surface bin while band contents use
+  the destination bin's v_c — an acknowledged, documented inconsistency
+  (the comment's "consistent one-point choice" is a fair call: the true
+  history integrates over the ion's own trajectory, which neither choice
+  captures). Also inherent at this fidelity: xi is the pitch at the birth
+  position's B, while the relaxed distribution is really a
+  bounce/surface-averaged one; consistent with the package's stated
+  model level.
+
+### Key cross-check numbers
+
+| check | value |
+|---|---|
+| `sum Gamma_i m_b/m_i` vs `v_c^3/tau_se` | rel 2.2e-16 (exact identity) |
+| ODE vs `X^{beta/3}` (P1) / `X^beta` (P2) | 3.3e-14 / 9.5e-13 |
+| beta scenario (D+2%C) / pure-D(anum 2.0) | 1.5888 / 0.9930 |
+| beta with per-species lnL | 1.557 (-2.0%) |
+| `nu_perp^e/nu_perp^i` at 30/50/100 keV | 0.016 / 0.020 / 0.027 |
+| clip distortion, worst (mean / `<xi^2>`) | 0.035 / 0.077 absolute |
+| GH rule moment errors (0-5th / 6th std.) | <1e-15 / 9 vs 15 |
+| min variance over (xi0, X) grid | -1.1e-16 (roundoff; clipped to 0) |
+| executed power balance (pitch branch) | rel 2.0e-15 |
+
+### Response (orchestrator)
+
+All findings addressed in sd_ladder.py: MINOR-1 module docstring updated
+(pitch scattering now documented as modelled via Gaffey relaxation);
+MINOR-2 node clipping replaced by a mean-preserving sigma-shrink so nodes
+stay inside |xi| < 1 without distorting the mean (variance reduction only,
+documented); NOTE-1 the "beta = 1 for like-species" claim corrected to
+m_b = m_i (pure-D case: 0.993); NOTE-4 redundant _local_sd_quantities call
+removed (v_c reused). NOTE-2/3/5 are documented acceptances (electron
+deflection ~2%, single-lnL beta shift -2%, birth-surface one-point choice).

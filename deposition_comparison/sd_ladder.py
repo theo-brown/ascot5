@@ -22,12 +22,14 @@ Because the bands telescope, summing rungs reproduces the single-band
 totals to machine precision, so overall power balance is exact regardless
 of ``n_rungs``.
 
-Orbit per rung: launch from the birth guiding-center position with the
-birth pitch (collisional drag preserves pitch; pitch-angle scattering is
-NOT modelled — that spread is the known remaining physics) and speed
+Orbit per rung: launch from the birth guiding-center position with speed
 ``v_rep`` (band midpoint in v; ``rung_rep="top"`` uses the band top, which
 with ``n_rungs=1`` reproduces the plain first-orbit average for
-validation).
+validation). With ``pitch_scattering=False`` the birth pitch is kept down
+the whole ladder (drag only); with ``pitch_scattering=True`` the pitch
+distribution at each rung follows the Gaffey/Cordey collisional
+relaxation, represented by three moment-matched pitch nodes (see the
+inline derivation notes; independently reviewed in REVIEW_SD.md).
 """
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -96,13 +98,17 @@ def ladder_sd(R, z, vpar, mu, e_keV, rate, eq: Equilibrium, plasma,
     # decay as  <P_l>(v) = P_l(xi0) X^{l(l+1) beta / 6}  with
     #   X(v) = (v^3/(v^3+v_c^3)) ((v0^3+v_c^3)/v0^3),
     #   beta = Z_eff / [Z],  [Z] = sum_i (n_i Z_i^2/n_e)(m_b/m_i)
-    # (Gaffey 1976 J. Plasma Phys. 16 149; Cordey & Core 1974). beta = 1 for
-    # a like-species plasma. From <P_1> and <P_2> the exact mean and
-    # variance follow; three Gauss-Hermite nodes (mu, mu +- sqrt(3) sigma;
-    # weights 1/6, 2/3, 1/6) match both moments and sum to 1, so power
-    # balance is untouched. beta and v_c are evaluated at the birth-surface
-    # bin (the pitch history integrates over the ion's own trajectory; the
-    # birth surface is the consistent one-point choice).
+    # (Gaffey 1976 J. Plasma Phys. 16 149; Cordey & Core 1974). beta = 1
+    # exactly when m_b = m_i (this package's pure-D case gives 0.993 since
+    # the beam is 2.0141 amu vs plasma 2.014). From <P_1> and <P_2> the
+    # exact mean and variance follow; three Gauss-Hermite nodes
+    # (mu, mu +- sqrt(3) sigma; weights 1/6, 2/3, 1/6) match both moments
+    # and sum to 1, so power balance is untouched. Where a node would leave
+    # |xi| < 1, sigma is shrunk to fit instead of clipping the node: the
+    # mean is preserved exactly and only the (physically bounded) variance
+    # is reduced. beta and v_c are evaluated at the birth-surface bin (the
+    # pitch history integrates over the ion's own trajectory; the birth
+    # surface is the consistent one-point choice).
     if pitch_scattering:
         from .physics import profiles as _profiles
         idx_b = jnp.clip(jnp.searchsorted(rho_edges, jnp.sqrt(
@@ -114,7 +120,7 @@ def ladder_sd(R, z, vpar, mu, e_keV, rate, eq: Equilibrium, plasma,
         zbar = jnp.sum(ni_b * zi**2 * (m_b / mi), axis=-1) / ne_b
         beta = zeff / zbar                                  # (ncell,)
 
-        vc_b = _local_sd_quantities(plasma, centers, m_b, 1.0)[1][idx_b]
+        vc_b = v_c[idx_b]
         X = ((v_rep**3 / (v_rep**3 + vc_b[:, None] ** 3))
              * ((v0**3 + vc_b**3) / v0**3)[:, None])        # (ncell, L)
         mean = xi[:, None] * X ** (beta[:, None] / 3.0)
@@ -122,9 +128,11 @@ def ladder_sd(R, z, vpar, mu, e_keV, rate, eq: Equilibrium, plasma,
         p2 = p2_0[:, None] * X ** beta[:, None]
         xi2 = (1.0 + 2.0 * p2) / 3.0
         sig = jnp.sqrt(jnp.clip(xi2 - mean**2, 0.0))
+        # Shrink sigma (never the mean) so all nodes stay inside |xi| < 1.
+        sig_max = jnp.minimum(0.999 - mean, mean + 0.999) / jnp.sqrt(3.0)
+        sig = jnp.minimum(sig, jnp.maximum(sig_max, 0.0))
         nodes = jnp.stack([mean - jnp.sqrt(3.0) * sig, mean,
                            mean + jnp.sqrt(3.0) * sig], axis=-1)
-        nodes = jnp.clip(nodes, -0.999, 0.999)              # (ncell, L, 3)
         node_w = jnp.array([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
     else:
         nodes = xi[:, None, None] * jnp.ones((1, L, 1))     # (ncell, L, 1)
