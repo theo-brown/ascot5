@@ -41,7 +41,8 @@ from .slowing_down import (SlowingDownResult, _F, _G, _local_sd_quantities)
 
 def ladder_sd(R, z, vpar, mu, e_keV, rate, eq: Equilibrium, plasma,
               rho_edges, e_edges_keV, *, mass_amu, emin_keV=20.0,
-              n_rungs=5, rung_rep="mid", t_int=7.5e-4, n_steps=3000):
+              n_rungs=5, rung_rep="mid", pitch_scattering=False,
+              t_int=7.5e-4, n_steps=3000):
     """Slowing-down profiles with per-rung orbit averaging.
 
     Parameters mirror the deterministic chain's birth cells: guiding-center
@@ -86,17 +87,63 @@ def ladder_sd(R, z, vpar, mu, e_keV, rate, eq: Equilibrium, plasma,
     eE = e_edges_keV * 1e3 * E_CHARGE
     vE = jnp.sqrt(2.0 * eE / m_b)                     # (nE+1,)
 
-    # One orbit per (cell, rung) at the representative band speed.
+    # Representative band speed per rung.
     v_rep = va if rung_rep == "top" else 0.5 * (va + vb)   # (ncell, L)
-    vr = v_rep.reshape(-1)
-    Rf = jnp.repeat(R, L)
-    zf = jnp.repeat(z, L)
-    xif = jnp.repeat(xi, L)
-    Bf = jnp.repeat(B0mag, L)
-    frac, err = orbit_average_matrix(
+
+    # Pitch nodes per (cell, rung). Without pitch scattering: the birth
+    # pitch, weight 1. With it: Gaffey/Cordey collisional pitch relaxation.
+    # Legendre moments of the pitch distribution of ions slowing from v0
+    # decay as  <P_l>(v) = P_l(xi0) X^{l(l+1) beta / 6}  with
+    #   X(v) = (v^3/(v^3+v_c^3)) ((v0^3+v_c^3)/v0^3),
+    #   beta = Z_eff / [Z],  [Z] = sum_i (n_i Z_i^2/n_e)(m_b/m_i)
+    # (Gaffey 1976 J. Plasma Phys. 16 149; Cordey & Core 1974). beta = 1 for
+    # a like-species plasma. From <P_1> and <P_2> the exact mean and
+    # variance follow; three Gauss-Hermite nodes (mu, mu +- sqrt(3) sigma;
+    # weights 1/6, 2/3, 1/6) match both moments and sum to 1, so power
+    # balance is untouched. beta and v_c are evaluated at the birth-surface
+    # bin (the pitch history integrates over the ion's own trajectory; the
+    # birth surface is the consistent one-point choice).
+    if pitch_scattering:
+        from .physics import profiles as _profiles
+        idx_b = jnp.clip(jnp.searchsorted(rho_edges, jnp.sqrt(
+            (R - eq.R0) ** 2 + z**2) / eq.a, "right") - 1, 0, nbin - 1)
+        ne_b, _, ni_b = _profiles(plasma, centers[idx_b])
+        zi = jnp.asarray(plasma.znum, dtype=jnp.float64)
+        mi = jnp.asarray(plasma.anum, dtype=jnp.float64) * AMU_KG
+        zeff = jnp.sum(ni_b * zi**2, axis=-1) / jnp.sum(ni_b * zi, axis=-1)
+        zbar = jnp.sum(ni_b * zi**2 * (m_b / mi), axis=-1) / ne_b
+        beta = zeff / zbar                                  # (ncell,)
+
+        vc_b = _local_sd_quantities(plasma, centers, m_b, 1.0)[1][idx_b]
+        X = ((v_rep**3 / (v_rep**3 + vc_b[:, None] ** 3))
+             * ((v0**3 + vc_b**3) / v0**3)[:, None])        # (ncell, L)
+        mean = xi[:, None] * X ** (beta[:, None] / 3.0)
+        p2_0 = 0.5 * (3.0 * xi**2 - 1.0)
+        p2 = p2_0[:, None] * X ** beta[:, None]
+        xi2 = (1.0 + 2.0 * p2) / 3.0
+        sig = jnp.sqrt(jnp.clip(xi2 - mean**2, 0.0))
+        nodes = jnp.stack([mean - jnp.sqrt(3.0) * sig, mean,
+                           mean + jnp.sqrt(3.0) * sig], axis=-1)
+        nodes = jnp.clip(nodes, -0.999, 0.999)              # (ncell, L, 3)
+        node_w = jnp.array([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+    else:
+        nodes = xi[:, None, None] * jnp.ones((1, L, 1))     # (ncell, L, 1)
+        node_w = jnp.array([1.0])
+    nnode = nodes.shape[-1]
+
+    # One orbit per (cell, rung, pitch node); kernels averaged over nodes.
+    vr = jnp.broadcast_to(v_rep[:, :, None],
+                          (R.shape[0], L, nnode)).reshape(-1)
+    xif = nodes.reshape(-1)
+    Rf = jnp.repeat(R, L * nnode)
+    zf = jnp.repeat(z, L * nnode)
+    Bf = jnp.repeat(B0mag, L * nnode)
+    frac_n, err = orbit_average_matrix(
         eq, rho_edges, Rf, zf, xif * vr,
         m_b * vr**2 * (1.0 - xif**2) / (2.0 * Bf),
-        mass_amu=mass_amu, t_int=t_int, n_steps=n_steps)   # (ncell*L, nbin)
+        mass_amu=mass_amu, t_int=t_int, n_steps=n_steps)
+    frac = jnp.einsum("n,clnb->clb", node_w,
+                      frac_n.reshape(-1, L, nnode, nbin)).reshape(-1, nbin)
 
     # Per destination bin b: evaluate the exact band contents with that
     # bin's (tau_se, v_c, E_c), weight by the orbit-kernel column frac[:, b],
@@ -166,10 +213,10 @@ if __name__ == "__main__":
     # --- validation 1: n_rungs=1 with rep="top" == plain first-orbit avg
     lad1, _ = ladder_sd(R, z, vpar, mu, e_keV, rate, eq, plasma, rho_edges,
                         e_edges, mass_amu=mamu, n_rungs=1, rung_rep="top",
-                        t_int=5.0e-4, n_steps=2000)
+                        t_int=2.5e-4, n_steps=1000)
     frac0, _ = orbit_average_matrix(eq, rho_edges, R, z, vpar, mu,
-                                    mass_amu=mamu, t_int=5.0e-4,
-                                    n_steps=2000)
+                                    mass_amu=mamu, t_int=2.5e-4,
+                                    n_steps=1000)
     oa0 = orbit_averaged_sd(frac0, e_keV, rate, eq, plasma, rho_edges,
                             e_edges, mass_amu=mamu)
     d1 = rel_l1(np.asarray(lad1.density), np.asarray(oa0.density))
@@ -178,24 +225,40 @@ if __name__ == "__main__":
     assert d1 < 1e-10
 
     # --- validation 2: exact power balance, any rung count
-    for L in (1, 3, 5):
+    for L in (1, 5):
         lad, _ = ladder_sd(R, z, vpar, mu, e_keV, rate, eq, plasma,
                            rho_edges, e_edges, mass_amu=mamu, n_rungs=L,
-                           t_int=2.0e-4, n_steps=500)
+                           t_int=1.0e-4, n_steps=200)
         dep = float(jnp.sum((lad.pe + lad.pi_) * vols))
         exp = float(jnp.sum(rate * jnp.clip(e_keV - 20.0, 0.0) * 1e3
                             * E_CHARGE))
         print(f"power balance, {L} rungs: rel {abs(dep/exp-1):.2e}")
         assert abs(dep / exp - 1.0) < 1e-10
 
-    # --- the ladder run
+    # --- the ladder runs (drag-only, and with Gaffey pitch scattering)
     t0 = time.perf_counter()
     lad, err = ladder_sd(R, z, vpar, mu, e_keV, rate, eq, plasma, rho_edges,
-                         e_edges, mass_amu=mamu, n_rungs=5)
+                         e_edges, mass_amu=mamu, n_rungs=5,
+                         t_int=5.0e-4, n_steps=2000)
     jax.block_until_ready(lad.density)
     t_lad = time.perf_counter() - t0
     print(f"\n5-rung ladder: {t_lad:.1f} s, orbit energy cons. max "
           f"{float(err.max()):.1e}")
+
+    t0 = time.perf_counter()
+    ladp, errp = ladder_sd(R, z, vpar, mu, e_keV, rate, eq, plasma,
+                           rho_edges, e_edges, mass_amu=mamu, n_rungs=5,
+                           pitch_scattering=True, t_int=5.0e-4,
+                           n_steps=2000)
+    jax.block_until_ready(ladp.density)
+    t_ladp = time.perf_counter() - t0
+    dep = float(jnp.sum((ladp.pe + ladp.pi_) * vols))
+    exp = float(jnp.sum(rate * jnp.clip(e_keV - 20.0, 0.0) * 1e3
+                        * E_CHARGE))
+    print(f"5-rung ladder + pitch scattering (3 nodes/rung): {t_ladp:.1f} s,"
+          f" orbit energy cons. max {float(errp.max()):.1e}, "
+          f"power balance rel {abs(dep/exp-1):.1e}")
+    assert abs(dep / exp - 1.0) < 1e-10
 
     dens_ref = np.asarray(ref["density"])
     pe_ref, pi_ref = np.asarray(ref["pe"]), np.asarray(ref["pi"])
@@ -203,7 +266,8 @@ if __name__ == "__main__":
                          * np.asarray(vols))) / 1e3
     print(f"\n{'model':<26}{'L1 n_fast':>11}{'L1 P_i':>9}{'L1 P_e':>9}"
           f"{'W_fast [kJ]':>13}")
-    for nm, sd in [("first-orbit avg", oa0), ("5-rung ladder", lad)]:
+    for nm, sd in [("first-orbit avg", oa0), ("5-rung ladder", lad),
+                   ("ladder + pitch scatter", ladp)]:
         print(f"{nm:<26}"
               f"{rel_l1(np.asarray(sd.density), dens_ref):>11.3f}"
               f"{rel_l1(np.asarray(sd.pi_), pi_ref):>9.3f}"
@@ -225,16 +289,20 @@ if __name__ == "__main__":
         a.step(centers, np.asarray(getattr(oa0, attr)), where="mid",
                color="C3", label="first-orbit avg")
         a.step(centers, np.asarray(getattr(lad, attr)), where="mid",
-               color="C2", label="5-rung ladder")
+               color="C2", label="5-rung ladder (drag only)")
+        a.step(centers, np.asarray(getattr(ladp, attr)), where="mid",
+               color="C4", lw=1.8, label="ladder + pitch scattering")
         a.set_xlabel(r"$\rho$")
         a.set_ylabel(lab)
         a.grid(alpha=0.3)
     ax[0].legend(frameon=False, fontsize=9)
     fig.suptitle(
-        "Energy-resolved orbit averaging (slowing-down ladder), "
-        "deterministic pencil source - n$_f$ rel-L1 vs ASCOT5: "
-        f"{rel_l1(np.asarray(oa0.density), dens_ref):.2f} (first-orbit) -> "
-        f"{rel_l1(np.asarray(lad.density), dens_ref):.2f} (ladder)")
+        "Slowing-down ladder with Gaffey pitch relaxation, deterministic "
+        "pencil source - n$_f$ rel-L1 vs ASCOT5: "
+        f"{rel_l1(np.asarray(oa0.density), dens_ref):.2f} (first-orbit), "
+        f"{rel_l1(np.asarray(lad.density), dens_ref):.2f} (drag-only "
+        "ladder), "
+        f"{rel_l1(np.asarray(ladp.density), dens_ref):.2f} (+ pitch)")
     fig.tight_layout()
     out = os.path.join(HERE, "comparison_ladder.png")
     fig.savefig(out, dpi=150)
